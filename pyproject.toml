@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "glue_hyvideo"
+version = "0.0.1"
+authors = [
+  { name="Yosshi999", email="Yosshi999@users.noreply.github.com" }
+]
+description = "Glue the boundaries of 3D RoPE to enable looped video generation."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3"
+]
+dependencies = [
+  "torch>=2.6.0",
+  "einops==0.8.0"
+]
