@@ -4,18 +4,8 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from .modules.posemb_layers import apply_rotary_emb
 from .modules.modulate_layers import modulate, apply_gate
-
-
-@torch.compiler.disable
-def glued_attention(
-    q, k, v, img_q_len, img_kv_len, 
-    attn_mode=None, text_mask=None, 
-    attn_param=None,
-    block_idx=None,
-):
-    pass
+from .flex_sta import glued_attention_3d
 
 
 def patched_forward_doublestream(
@@ -30,7 +20,6 @@ def patched_forward_doublestream(
     block_idx=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Patched version of MMDoubleStreamBlock."""
-    assert freqs_cis is not None, "Glued MMDoublestreamBlock requires RoPE frequencies."
     (
         img_mod1_shift,
         img_mod1_scale,
@@ -61,18 +50,6 @@ def patched_forward_doublestream(
     img_q = self.img_attn_q_norm(img_q).to(img_v)
     img_k = self.img_attn_k_norm(img_k).to(img_v)
 
-    # Extend image KV
-    # img_q, img_k: (batch, (patch_t, patch_h, patch_w), num_heads, head_dim)
-    # freqs_cis: tuple of (cos, sin) each of shape ((glued_t, glued_h, glued_w), head_dim//2)
-    (patch_t, patch_h, patch_w) = attn_param['thw']
-    (is_glued_t, is_glued_h, is_glued_w) = attn_param['is_glued_thw']
-    
-    img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-    assert (
-        img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-    ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-    img_q, img_k = img_qq, img_kk
-
     txt_modulated = self.txt_norm1(txt)
     txt_modulated = modulate(txt_modulated, shift=txt_mod1_shift, scale=txt_mod1_scale)
     txt_q = self.txt_attn_q(txt_modulated)
@@ -84,17 +61,16 @@ def patched_forward_doublestream(
     txt_q = self.txt_attn_q_norm(txt_q).to(txt_v)
     txt_k = self.txt_attn_k_norm(txt_k).to(txt_v)
 
-    attn_mode = 'flash' if is_flash else self.attn_mode
-    attn = glued_attention(
+    attn = glued_attention_3d(
         (img_q, txt_q),
         (img_k, txt_k),
         (img_v, txt_v),
-        img_q_len=img_q.shape[1],
-        img_kv_len=img_k.shape[1],
-        text_mask=text_mask,
-        attn_mode=attn_mode,
-        attn_param=attn_param,
-        block_idx=block_idx,
+        attn_param["rope_dim_list"],
+        attn_param["rope_theta"],
+        attn_param["thw"],
+        attn_param["glued_thw"],
+        attn_param["tile_thw"],
+        attn_param["kernel_thw"],
     )
 
     img_attn, txt_attn = attn[:, :img_q.shape[1]].contiguous(), attn[:, img_q.shape[1]:].contiguous()
@@ -127,7 +103,6 @@ def patched_forward_singlestream(
     is_flash=False,
 ) -> torch.Tensor:
     """Patched version of MMSingleStreamBlock."""
-    assert freqs_cis is not None, "Glued MMSinglestreamBlock requires RoPE frequencies."
     mod_shift, mod_scale, mod_gate = self.modulation(vec).chunk(3, dim=-1)
     x_mod = modulate(self.pre_norm(x), shift=mod_shift, scale=mod_scale)
 
@@ -149,29 +124,47 @@ def patched_forward_singlestream(
     img_k, txt_k = k[:, :-txt_len, :, :], k[:, -txt_len:, :, :]
     img_v, txt_v = v[:, :-txt_len, :, :], v[:, -txt_len:, :, :]
 
-    # Extend image KV
-
-
-    img_qq, img_kk = apply_rotary_emb(img_q, img_k, freqs_cis, head_first=False)
-    assert (
-        img_qq.shape == img_q.shape and img_kk.shape == img_k.shape
-    ), f"img_kk: {img_qq.shape}, img_q: {img_q.shape}, img_kk: {img_kk.shape}, img_k: {img_k.shape}"
-    img_q, img_k = img_qq, img_kk
-
-    if is_flash:
-        attn_mode = 'flash'
-    else:
-        attn_mode = self.attn_mode
-    attn = glued_attention(
+    attn = glued_attention_3d(
         (img_q, txt_q),
         (img_k, txt_k),
         (img_v, txt_v),
-        img_q_len=img_q.shape[1],
-        img_kv_len=img_k.shape[1],
-        text_mask=text_mask,
-        attn_mode=attn_mode,
-        attn_param=attn_param,
+        attn_param["rope_dim_list"],
+        attn_param["rope_theta"],
+        attn_param["thw"],
+        attn_param["glued_thw"],
+        attn_param["tile_thw"],
+        attn_param["kernel_thw"],
     )
     output = self.linear2(attn, self.mlp_act(mlp))
     
     return x + apply_gate(output, gate=mod_gate)
+
+def patch_model(
+    model: nn.Module,
+    glue_t = False,
+    glue_h = False,
+    glue_w = False,
+    tile_size: Tuple[int, int, int] = (4, 8, 8),
+    kernel_dims: Tuple[int, int, int] = (1, 1, 1),
+) -> nn.Module:
+    if getattr(model, "__already_patched", False):
+        return model
+    model.__already_patched = True
+    assert model.__class__.__name__ == "HunyuanVideo_1_5_DiffusionTransformer"
+
+    # overwrite attn_param
+    model.attn_param = {
+        "rope_dim_list": model.rope_dim_list,
+        "rope_theta": model.rope_theta,
+        "thw": None,  # to be set during forward
+        "glued_thw": (glue_t, glue_h, glue_w),
+        "tile_thw": tile_size,
+        "kernel_thw": kernel_dims,
+    }
+
+    for block in model.double_blocks:
+        block.forward = MethodType(patched_forward_doublestream, block)
+    for block in model.single_blocks:
+        block.forward = MethodType(patched_forward_singlestream, block)
+    
+    return model
