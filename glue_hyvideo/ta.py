@@ -234,6 +234,15 @@ class TiledFlexAttnProcessor:
             #     device=query.device,
             #     BLOCK_SIZE=block_size,
             # )
+            # self.block_mask = torch.compile(create_block_mask)(  # OK
+            #     mask_mod,
+            #     1,
+            #     1,
+            #     seq_len,
+            #     seq_len,
+            #     device=query.device,
+            #     BLOCK_SIZE=block_size,
+            # )
             full_block_mask = torch.ones((seq_len // block_size, seq_len // block_size), dtype=bool)
             kv_indices = torch.argsort(full_block_mask, dim=1, descending=True).int()
             kv_num_blocks = torch.sum(full_block_mask, dim=1).int()
