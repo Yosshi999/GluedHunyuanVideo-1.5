@@ -203,6 +203,7 @@ class TiledFlexAttnProcessor:
             key = torch.cat([key, encoder_key], dim=1)
             value = torch.cat([value, encoder_value], dim=1)
             text_len = encoder_hidden_states.shape[1]
+            text_attn_len = torch.clamp(attention_mask.bool().sum(1), min=text_len)  # (B,)
         block_size = int(np.prod(self.tile_dims))
         query, _ = pad_to_multiple(query, block_size, 1)
         key, _ = pad_to_multiple(key, block_size, 1)
@@ -218,11 +219,11 @@ class TiledFlexAttnProcessor:
                 return torch.where(
                     q_idx < image_len_withpad,
                     (q0 < canvas_dims[0]) & (q1 < canvas_dims[1]) & (q2 < canvas_dims[2]),
-                    q_idx - image_len_withpad < text_len,
+                    q_idx - image_len_withpad < text_attn_len[b],
                 ) & torch.where(
                     kv_idx < image_len_withpad,
                     (k0 < canvas_dims[0]) & (k1 < canvas_dims[1]) & (k2 < canvas_dims[2]),
-                    kv_idx - image_len_withpad < text_len,
+                    kv_idx - image_len_withpad < text_attn_len[b],
                 )
 
             # self.block_mask = create_block_mask(  # OOM
