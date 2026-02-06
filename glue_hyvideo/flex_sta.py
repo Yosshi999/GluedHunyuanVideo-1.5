@@ -19,7 +19,7 @@ import torch
 from torch.nn.attention.flex_attention import flex_attention, BlockMask
 import numpy as np
 from einops import rearrange
-from .modules.posemb_layers import apply_rotary_emb, get_nd_rotary_pos_embed
+# from .modules.posemb_layers import apply_rotary_emb, get_nd_rotary_pos_embed
 
 compiled_flex_attention = torch.compile(flex_attention)
 
@@ -143,7 +143,7 @@ def untile_indices(
     D1, D2, D3 = C1 // T1, C2 // T2, C3 // T3
 
     # indices are in the tiled format: (D1 D2 D3 T1 T2 T3)
-    # convert back to original format: (D1 C1) (D2 C2) (D3 C3)
+    # convert back to original format: (D1 T1) (D2 T2) (D3 T3)
     t3 = indices % T3
     t2 = (indices // T3) % T2
     t1 = (indices // (T3 * T2)) % T1
@@ -322,3 +322,269 @@ def glued_attention_3d(
         block_mask=flex_block_mask,
     )
     return rearrange(output, "B H L E -> B L H E")
+
+from typing import Optional, Tuple
+from diffusers.models.attention_processor import Attention
+from diffusers.models.embeddings import apply_rotary_emb, get_1d_rotary_pos_embed
+from diffusers.models.transformers.transformer_hunyuan_video15 import HunyuanVideo15RotaryPosEmbed
+from torch import nn
+
+class GluedAttnProcessor(nn.Module):
+    def __init__(
+        self,
+        rope_dim_list: Tuple[int, int, int],
+        rope_theta: int,
+        canvas_dims: Tuple[int, int, int],
+        glued_dims: Tuple[bool, bool, bool] = (False, False, False),
+        tile_dims: Tuple[int, int, int] = (4, 8, 8),
+        kernel_dims: Tuple[int, int, int] = (1, 1, 1),
+    ):
+        """3-D Sliding Tile Attention with glued boundaries.
+
+        Args:
+            rope_dim_list (Tuple[int, int, int]): RoPE dimensions for image tokens.
+            rope_theta (int): RoPE theta parameter.
+            canvas_dims (Tuple[int, int, int]): dimensions of the canvas.
+            glued_dims (Tuple[bool, bool, bool]): which dimensions are glued.
+            tile_dims (Tuple[int, int, int]): dimensions of each tile.
+            kernel_dims (Tuple[int, int, int]): dimensions of the attention kernel.
+        """
+        self.rope_dim_list = rope_dim_list
+        self.rope_theta = rope_theta
+        self.canvas_dims = canvas_dims
+        self.glued_dims = glued_dims
+        self.tile_dims = tile_dims
+        self.kernel_dims = kernel_dims
+
+        axes_grids_k = []
+        axes_grids_q = []
+        for i in range(3):
+            if glued_dims[i]:
+                glue_size = tile_dims[i] * (kernel_dims[i] // 2)
+                rope_start = -glue_size
+                rope_end = canvas_dims[i] + glue_size
+            else:
+                rope_start = 0
+                rope_end = canvas_dims[i]
+            grid = torch.arange(rope_start, rope_end, dtype=torch.float32)
+            axes_grids_k.append(grid)
+            axes_grids_q.append(torch.arange(0, canvas_dims[i], dtype=torch.float32))
+        grid_k = torch.stack(torch.meshgrid(*axes_grids_k, indexing="ij"), dim=0)
+        grid_q = torch.stack(torch.meshgrid(*axes_grids_q, indexing="ij"), dim=0)
+
+        freqs_k = []
+        freqs_q = []
+        for i in range(3):
+            freq_k = get_1d_rotary_pos_embed(rope_dim_list[i], grid_k[i].reshape(-1), rope_theta, use_real=True)
+            freq_q = get_1d_rotary_pos_embed(rope_dim_list[i], grid_q[i].reshape(-1), rope_theta, use_real=True)
+            freqs_k.append(freq_k)
+            freqs_q.append(freq_q)
+        freqs_cos_k = torch.cat([f[0] for f in freqs_k], dim=1)  # (W * H * T, D / 2)
+        freqs_sin_k = torch.cat([f[1] for f in freqs_k], dim=1)  # (W * H * T, D / 2)
+        freqs_cos_q = torch.cat([f[0] for f in freqs_q], dim=1)  # (W * H * T, D / 2)
+        freqs_sin_q = torch.cat([f[1] for f in freqs_q], dim=1)  # (W * H * T, D / 2)
+        self.register_buffer("freqs_cos_k", freqs_cos_k)
+        self.register_buffer("freqs_sin_k", freqs_sin_k)
+        self.register_buffer("freqs_cos_q", freqs_cos_q)
+        self.register_buffer("freqs_sin_q", freqs_sin_q)
+    
+    def _glue_kv(self, image_k: torch.Tensor, image_v: torch.Tensor):
+        """Glue boundaries of KV.
+        Note that glue padding is even to tile size.
+        # image_k, image_v: (B, L, heads, dim)
+        """
+        sequence_dim = 1
+        # unflatten to THW
+        image_k = image_k.unflatten(sequence_dim, self.canvas_dims)
+        image_v = image_v.unflatten(sequence_dim, self.canvas_dims)
+
+        glue_paddings = []
+        for i in range(len(self.canvas_dims)):
+            dim_size = image_k.shape[sequence_dim + i]
+            if self.glued_dims[i]:
+                # glue along dimension i
+                glue_size = self.tile_dims[i] * (self.kernel_dims[i] // 2)
+                left_glue = image_k.narrow(sequence_dim + i, dim_size - glue_size, glue_size)
+                right_glue = image_k.narrow(sequence_dim + i, 0, glue_size)
+                image_k = torch.cat([left_glue, image_k, right_glue], dim=sequence_dim + i)
+                left_glue_v = image_v.narrow(sequence_dim + i, dim_size - glue_size, glue_size)
+                right_glue_v = image_v.narrow(sequence_dim + i, 0, glue_size)
+                image_v = torch.cat([left_glue_v, image_v, right_glue_v], dim=sequence_dim + i)
+                glue_paddings.append((glue_size, glue_size))
+            else:
+                glue_paddings.append((0, 0))
+        # flatten back
+        image_k = image_k.flatten(sequence_dim, sequence_dim + len(self.canvas_dims) - 1)
+        image_v = image_v.flatten(sequence_dim, sequence_dim + len(self.canvas_dims) - 1)
+        return image_k, image_v, glue_paddings
+    
+    def _pad_to_tile(self, image_q, image_k, image_v):
+        """Pad image tokens to even tile division."""
+        sequence_dim = 1
+        rank = len(self.canvas_dims)
+        # unflatten to THW
+        image_q = image_q.unflatten(sequence_dim, self.canvas_dims)
+        image_k = image_k.unflatten(sequence_dim, self.canvas_dims)
+        image_v = image_v.unflatten(sequence_dim, self.canvas_dims)
+
+        pad = [0 for _ in range(2 * rank)]  # note that torch.nn.functional.pad uses reverse order
+        for i in range(rank):
+            if self.canvas_dims[i] % self.tile_dims[i] != 0:
+                pad[-1 - 2 * i] = (-self.canvas_dims[i]) % self.tile_dims[i]
+        image_q = torch.nn.functional.pad(image_q, [0, 0, 0, 0] + pad)  # (B, D1 + p1, D2 + p2, ..., H, E)
+        image_k = torch.nn.functional.pad(image_k, [0, 0, 0, 0] + pad)
+        image_v = torch.nn.functional.pad(image_v, [0, 0, 0, 0] + pad)
+        new_canvas_dims_q = image_q.shape[sequence_dim : sequence_dim + rank]
+        new_canvas_dims_kv = image_k.shape[sequence_dim : sequence_dim + rank]
+
+        # flatten back
+        image_q = image_q.flatten(sequence_dim, sequence_dim + rank - 1)
+        image_k = image_k.flatten(sequence_dim, sequence_dim + rank - 1)
+        image_v = image_v.flatten(sequence_dim, sequence_dim + rank - 1)
+        return image_q, image_k, image_v, new_canvas_dims_q, new_canvas_dims_kv
+    
+    def _pad_to_tile_text(self, text_q, text_k, text_v):
+        """Pad text tokens to even tile division."""
+        sequence_dim = 2  # (B, H, L, E)
+        block_size = np.prod(self.tile_dims)
+        text_len = text_q.shape[sequence_dim]
+        if text_len % block_size != 0:
+            pad_len = block_size - (text_len % block_size)
+            text_q = torch.nn.functional.pad(text_q, (0, 0, 0, pad_len))
+            text_k = torch.nn.functional.pad(text_k, (0, 0, 0, pad_len))
+            text_v = torch.nn.functional.pad(text_v, (0, 0, 0, pad_len))
+        else:
+            pad_len = 0
+        return text_q, text_k, text_v, text_len + pad_len
+
+    def __call__(
+        self,
+        attn: Attention,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # 1. QKV projections
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        query = query.unflatten(2, (attn.heads, -1))
+        key = key.unflatten(2, (attn.heads, -1))
+        value = value.unflatten(2, (attn.heads, -1))
+
+        # 2. QK normalization
+        query = attn.norm_q(query)
+        key = attn.norm_k(key)
+
+        # 3. Glue KV boundaries for image tokens
+        # token shape: (B, L, heads, dim)
+        key, value, glue_paddings = self._glue_kv(key, value)
+
+        # 4. Apply Glued RoPE to image tokens
+        query = apply_rotary_emb(query, (self.freqs_cos_q, self.freqs_sin_q), sequence_dim=1)
+        key = apply_rotary_emb(key, (self.freqs_cos_k, self.freqs_sin_k), sequence_dim=1)
+
+        query, key, value, full_q_dims, full_kv_dims = self._pad_to_tile(query, key, value)
+
+        # 5. Reordering to (B, heads, L, dim)
+        query = query.permute(0, 2, 1, 3)
+        key = key.permute(0, 2, 1, 3)
+        value = value.permute(0, 2, 1, 3)
+
+        # 6. Tiling
+        query = tile_mat(query, full_q_dims, self.tile_dims)
+        key = tile_mat(key, full_kv_dims, self.tile_dims)
+        value = tile_mat(value, full_kv_dims, self.tile_dims)
+        assert query.shape[2] == np.prod(full_q_dims)
+        assert key.shape[2] == np.prod(full_kv_dims)
+        assert value.shape[2] == np.prod(full_kv_dims)
+
+        # Encoder condition QKV projection and normalization
+        if encoder_hidden_states is not None:
+            encoder_query = attn.add_q_proj(encoder_hidden_states)
+            encoder_key = attn.add_k_proj(encoder_hidden_states)
+            encoder_value = attn.add_v_proj(encoder_hidden_states)
+
+            encoder_query = encoder_query.unflatten(2, (attn.heads, -1))
+            encoder_key = encoder_key.unflatten(2, (attn.heads, -1))
+            encoder_value = encoder_value.unflatten(2, (attn.heads, -1))
+
+            if attn.norm_added_q is not None:
+                encoder_query = attn.norm_added_q(encoder_query)
+            if attn.norm_added_k is not None:
+                encoder_key = attn.norm_added_k(encoder_key)
+            
+            # 7. Reordering to (B, heads, L, dim)
+            encoder_query = encoder_query.permute(0, 2, 1, 3)
+            encoder_key = encoder_key.permute(0, 2, 1, 3)
+            encoder_value = encoder_value.permute(0, 2, 1, 3)
+            text_len = encoder_query.shape[2]
+
+            # 8. Pad
+            encoder_query, encoder_key, encoder_value, _ = self._pad_to_tile_text(encoder_query, encoder_key, encoder_value)
+
+            # 9. Combine image and text tokens
+            query = torch.cat([query, encoder_query], dim=2)
+            key = torch.cat([key, encoder_key], dim=2)
+            value = torch.cat([value, encoder_value], dim=2)
+        else:
+            text_len = 0
+            
+        block_size = np.prod(self.tile_dims)
+        assert query.shape[2] % block_size == 0 and key.shape[2] % block_size == 0
+        full_block_mask = torch.zeros((query.shape[2] // block_size, key.shape[2] // block_size), dtype=bool)
+        block_mask = create_sta_nd_mask(full_q_dims, glue_paddings, self.tile_dims, self.kernel_dims)
+        full_block_mask[:block_mask.shape[0], :block_mask.shape[1]] = block_mask
+        full_block_mask[:, block_mask.shape[1]:] = True  # any query can attend to all text tokens
+        full_block_mask[block_mask.shape[0]:, :] = True  # text tokens can attend to all image tokens without glue
+
+        tile_dims = self.tile_dims
+        full_q_len = np.prod(full_q_dims)
+        full_kv_len = np.prod(full_kv_dims)
+        canvas_dims = self.canvas_dims
+        glued_canvas_dims = tuple(
+            [c + (pad[0] + pad[1]) for c, pad in zip(canvas_dims, glue_paddings)]
+        )
+        # TODO: mark dense blocks to optimize mask_mod
+        def mask_mod(b, h, q_idx, kv_idx):
+            qt, qy, qx = untile_indices(q_idx, full_q_dims, tile_dims)
+            kt, ky, kx = untile_indices(kv_idx, full_kv_dims, tile_dims)
+            return torch.where(
+                q_idx < full_q_len,
+                (qt < canvas_dims[0]) & (qy < canvas_dims[1]) & (qx < canvas_dims[2]),
+                q_idx - full_q_len < text_len,
+            ) & torch.where(
+                kv_idx < full_kv_len,
+                (kt < glued_canvas_dims[0]) & (ky < glued_canvas_dims[1]) & (kx < glued_canvas_dims[2]),
+                kv_idx - full_kv_len < text_len,
+            )
+
+        kv_indices = torch.argsort(full_block_mask, dim=1, descending=True)
+        kv_num_blocks = torch.sum(full_block_mask, dim=1)
+        flex_block_mask = BlockMask(kv_num_blocks[None, None], kv_indices[None, None], BLOCK_SIZE=block_size, mask_mod=mask_mod)
+        hidden_states = compiled_flex_attention(
+            query,
+            key,
+            value,
+            block_mask=flex_block_mask,
+        )
+        hidden_states = hidden_states.permute(0, 2, 1, 3).flatten(2, 3)  # (B, L, heads * dim)
+
+        # Need Untile. Optimize?
+        # 10. Output projection
+        if encoder_hidden_states is not None:
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : -encoder_hidden_states.shape[1]],
+                hidden_states[:, -encoder_hidden_states.shape[1] :],
+            )
+
+            if getattr(attn, "to_out", None) is not None:
+                hidden_states = attn.to_out[0](hidden_states)
+                hidden_states = attn.to_out[1](hidden_states)
+
+            if getattr(attn, "to_add_out", None) is not None:
+                encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+        return hidden_states, encoder_hidden_states
