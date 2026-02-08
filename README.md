@@ -11,7 +11,7 @@ See [the original repository](https://github.com/Tencent-Hunyuan/HunyuanVideo-1.
 ```
 git clone https://github.com/Yosshi999/GluedHunyuanVideo-1.5
 cd GluedHunyuanVideo-1.5
-pip install -e .
+pip install .
 ```
 
 ## Quick Start
@@ -32,7 +32,7 @@ pipe = HunyuanVideo15Pipeline.from_pretrained("hunyuanvideo-community/HunyuanVid
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_tiling()
 
-patch_pipeline(pipe, glued_dims=(True, True, False))
+patch_pipeline(pipe, glued_dims=(True, False, True))  # Glue temporal and X axis
 
 generator = torch.Generator(device=device).manual_seed(seed)
 
