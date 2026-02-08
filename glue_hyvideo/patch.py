@@ -1,4 +1,5 @@
-from typing import MethodType, Union, List, Optional, Dict, Any, Tuple
+from typing import Union, List, Optional, Dict, Any, Tuple
+from types import MethodType
 import torch
 from diffusers import HunyuanVideo15Pipeline
 from .gsta import GluedSlidingTiledFlexAttnProcessor
