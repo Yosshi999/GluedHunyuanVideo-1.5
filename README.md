@@ -32,7 +32,7 @@ pipe = HunyuanVideo15Pipeline.from_pretrained("hunyuanvideo-community/HunyuanVid
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_tiling()
 
-patch_pipeline(pipe, glued_dims=(True, False, True))
+pipe = patch_pipeline(pipe, glued_dims=(True, False, True))
 
 generator = torch.Generator(device=device).manual_seed(seed)
 
