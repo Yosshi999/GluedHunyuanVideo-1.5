@@ -26,13 +26,13 @@ from glue_hyvideo import patch_pipeline
 dtype = torch.bfloat16
 device = "cuda:0"
 seed = 42
-prompt = "A cat is rolling forward and then looking around. The scene is in an animated style."
+prompt = "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard, and moves from right to left viewed from the camera. The scene is in an animated style."
 
-pipe = HunyuanVideo15Pipeline.from_pretrained("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-720p_t2v", torch_dtype=dtype)
+pipe = HunyuanVideo15Pipeline.from_pretrained("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v", torch_dtype=dtype)
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_tiling()
 
-patch_pipeline(pipe, glued_dims=(True, False, True))  # Glue temporal and X axis
+patch_pipeline(pipe, glued_dims=(True, False, True))
 
 generator = torch.Generator(device=device).manual_seed(seed)
 
@@ -45,3 +45,9 @@ video = pipe(
 
 export_to_video(video, "output.mp4", fps=24)
 ```
+
+## Known bugs
+* PyTorch == 2.9.0 causes OOM in processing Conv3D of the VAE decoder. Upgrade to 2.10 or nightly.
+
+# Notice
+Tencent Hunyuan is licensed under the Tencent Hunyuan Community License Agreement, Copyright © 2025 Tencent. All Rights Reserved. The trademark rights of “Tencent Hunyuan” are owned by Tencent or its affiliate.

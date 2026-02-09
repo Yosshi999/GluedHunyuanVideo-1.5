@@ -31,7 +31,7 @@ def patch_pipeline(
         # already patched
         return
     setattr(pipe, "__patched_gsta__", True)
-    original_call = pipe.__call__
+    original_call = pipe.__call__.__func__
 
     def patched_call(
         self: HunyuanVideo15Pipeline,
@@ -79,6 +79,7 @@ def patch_pipeline(
             block.attn.set_processor(processor)
         
         return original_call(
+            self,
             prompt,
             negative_prompt,
             height,
