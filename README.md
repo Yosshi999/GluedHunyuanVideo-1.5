@@ -52,4 +52,6 @@ export_to_video(video, "output.mp4", fps=24)
 * PyTorch == 2.9.0 causes OOM in processing Conv3D of the VAE decoder. Upgrade to 2.10 or nightly.
 
 # Notice
+This library is licensed under MIT License. However, please make sure of the original model's LICENSE when using it.
+
 Tencent Hunyuan is licensed under the Tencent Hunyuan Community License Agreement, Copyright © 2025 Tencent. All Rights Reserved. The trademark rights of “Tencent Hunyuan” are owned by Tencent or its affiliate.
