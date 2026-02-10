@@ -1,4 +1,6 @@
 # Glued Hunyuan Video 1.5
+![loopgif](./assets/loop4.gif)
+
 Glue the boundaries of latents to enable looped video generation of Diffuser-based Hunyuan Video 1.5.
 
 ## System Requirements
