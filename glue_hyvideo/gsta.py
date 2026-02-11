@@ -9,7 +9,7 @@ import numpy as np
 
 compiled_flex_attention = torch.compile(flex_attention)
 
-def glue_boundary(x: torch.Tensor, left_glue_size: int, right_glue_size: int, dim: int) -> torch.Tensor:
+def glue_boundary(x: torch.Tensor, left_glue_size: int, right_glue_size: int, dim: int, temporal_rotation: int = 0, temporal_dim: Optional[int] = None) -> torch.Tensor:
     """Glue the boundaries of the input tensor along a specific dimension.
 
     Args:
@@ -23,6 +23,10 @@ def glue_boundary(x: torch.Tensor, left_glue_size: int, right_glue_size: int, di
     dim_size = x.shape[dim]
     left_glue = x.narrow(dim, dim_size - left_glue_size, left_glue_size)
     right_glue = x.narrow(dim, 0, right_glue_size)
+    if temporal_rotation != 0:
+        assert temporal_dim is not None, "temporal_dim must be specified for temporal rotation"
+        right_glue = torch.roll(right_glue, shifts=temporal_rotation, dims=temporal_dim)
+
     x = torch.cat([left_glue, x, right_glue], dim=dim)
     return x
 
@@ -148,6 +152,7 @@ class GluedSlidingTiledFlexAttnProcessor(nn.Module):
         glued_dims: Tuple[bool, bool, bool] = (False, False, False),
         rope_dim_list: Tuple[int, int, int] = (16, 56, 56),
         rope_theta: int = 256,
+        temporal_rotation: int = 0,
     ):
         """3-D Sliding Tile Attention.
 
@@ -158,12 +163,16 @@ class GluedSlidingTiledFlexAttnProcessor(nn.Module):
             glued_dims (Tuple[bool, bool, bool]): whether to glue boundaries along each dimension.
             rope_dim_list (Tuple[int, int, int]): RoPE dimensions for image tokens.
             rope_theta (int): RoPE theta parameter.
+            temporal_rotation (int): frames to rotate along temporal dimension on gluing right boundary.
         """
         super().__init__()
         self.canvas_dims = canvas_dims
         self.tile_dims = tile_dims
         self.kernel_dims = kernel_dims
         self.glued_dims = glued_dims
+        self.temporal_rotation = temporal_rotation
+        if temporal_rotation != 0:
+            assert glued_dims[0], "temporal gluing must be enabled if temporal_rotation is set"
         self.block_mask: Optional[BlockMask] = None
 
         self.rope_dim_list = rope_dim_list
@@ -235,8 +244,12 @@ class GluedSlidingTiledFlexAttnProcessor(nn.Module):
                 # glue along dimension i
                 left_glue_size = self.tile_dims[i] * (self.kernel_dims[i] // 2)
                 right_glue_size = self.tile_dims[i] * ((self.kernel_dims[i]+1) // 2)
-                key = glue_boundary(key, left_glue_size, right_glue_size, 1 + i)
-                value = glue_boundary(value, left_glue_size, right_glue_size, 1 + i)
+                if i > 0 and self.temporal_rotation != 0:
+                    key = glue_boundary(key, left_glue_size, right_glue_size, 1 + i, self.temporal_rotation, temporal_dim=1)
+                    value = glue_boundary(value, left_glue_size, right_glue_size, 1 + i, self.temporal_rotation, temporal_dim=1)
+                else:
+                    key = glue_boundary(key, left_glue_size, right_glue_size, 1 + i)
+                    value = glue_boundary(value, left_glue_size, right_glue_size, 1 + i)
                 glued_offsets.append(left_glue_size)
                 glued_kv_dims.append(self.canvas_dims[i] + left_glue_size + right_glue_size)
             else:
