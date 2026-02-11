@@ -13,6 +13,7 @@ class PatchedHunyuanVideo15Pipeline:
         kernel_dims: Optional[Tuple[int, int, int]] = None,
         rope_dim_list: Tuple[int, int, int] = (16, 56, 56),
         rope_theta: int = 256,
+        temporal_rotation: int = 0,
     ):
         self.pipe = pipe
         self.glued_dims = glued_dims
@@ -20,6 +21,7 @@ class PatchedHunyuanVideo15Pipeline:
         self.kernel_dims = kernel_dims
         self.rope_dim_list = rope_dim_list
         self.rope_theta = rope_theta
+        self.temporal_rotation = temporal_rotation
 
     @torch.no_grad()
     def __call__(
@@ -61,7 +63,7 @@ class PatchedHunyuanVideo15Pipeline:
                 canvas_dims[1] // self.tile_dims[1],
                 canvas_dims[2] // self.tile_dims[2],
             )
-        processor = GluedSlidingTiledFlexAttnProcessor(canvas_dims, self.tile_dims, self.kernel_dims, self.glued_dims, self.rope_dim_list, self.rope_theta)
+        processor = GluedSlidingTiledFlexAttnProcessor(canvas_dims, self.tile_dims, self.kernel_dims, self.glued_dims, self.rope_dim_list, self.rope_theta, self.temporal_rotation)
         for block in self.pipe.transformer.transformer_blocks:
             block.attn.set_processor(processor)
         print("called patched pipeline")
@@ -96,6 +98,7 @@ def patch_pipeline(
     kernel_dims: Optional[Tuple[int, int, int]] = None,
     rope_dim_list: Tuple[int, int, int] = (16, 56, 56),
     rope_theta: int = 256,
+    temporal_rotation: int = 0,
 ) -> PatchedHunyuanVideo15Pipeline:
     """Patches HunyuanVideo15Pipeline in-place to use Glued Sliding Tiled Attention (GSTA).
     Args:
@@ -108,6 +111,7 @@ def patch_pipeline(
             As it gets smaller, the computation gets more efficient but the quality may degrade.
         rope_dim_list (Tuple[int, int, int]): The dimensions for RoPE (temporal, height, width).
         rope_theta (int): The theta parameter for RoPE.
+        temporal_rotation (int): frames to rotate along temporal dimension on gluing right boundary.
     """
 
     assert pipe.__class__.__name__ == "HunyuanVideo15Pipeline", "This patch function only works for HunyuanVideo15Pipeline."
@@ -115,4 +119,4 @@ def patch_pipeline(
         print("already patched")
         return
     setattr(pipe, "__patched_gsta__", True)
-    return PatchedHunyuanVideo15Pipeline(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta)        
+    return PatchedHunyuanVideo15Pipeline(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
