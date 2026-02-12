@@ -26,6 +26,7 @@ def glue_boundary(x: torch.Tensor, left_glue_size: int, right_glue_size: int, di
     if temporal_rotation != 0:
         assert temporal_dim is not None, "temporal_dim must be specified for temporal rotation"
         right_glue = torch.roll(right_glue, shifts=temporal_rotation, dims=temporal_dim)
+        left_glue = torch.roll(left_glue, shifts=-temporal_rotation, dims=temporal_dim)
 
     x = torch.cat([left_glue, x, right_glue], dim=dim)
     return x
