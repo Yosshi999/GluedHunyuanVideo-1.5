@@ -3,6 +3,7 @@ from types import MethodType
 import torch
 from diffusers import HunyuanVideo15Pipeline
 from .gsta import GluedSlidingTiledFlexAttnProcessor
+from .gvae import PatchedAutoencoderKLHunyuanVideo15
 
 class PatchedHunyuanVideo15Pipeline:
     def __init__(
@@ -119,4 +120,7 @@ def patch_pipeline(
         print("already patched")
         return
     setattr(pipe, "__patched_gsta__", True)
+    old_vae = pipe.vae
+    pipe.vae = PatchedAutoencoderKLHunyuanVideo15(old_vae.config, glued_dims)
+    pipe.vae.load_state_dict(old_vae.state_dict())
     return PatchedHunyuanVideo15Pipeline(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
