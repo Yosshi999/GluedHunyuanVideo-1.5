@@ -3,7 +3,7 @@ from diffusers import AutoencoderKLHunyuanVideo15
 from diffusers.models.autoencoders.vae import DecoderOutput
 from diffusers.utils.accelerate_utils import apply_forward_hook
 import torch
-
+import accelerate
 
 class PatchedAutoencoderKLHunyuanVideo15(AutoencoderKLHunyuanVideo15):
     @classmethod
@@ -12,7 +12,8 @@ class PatchedAutoencoderKLHunyuanVideo15(AutoencoderKLHunyuanVideo15):
         vae: AutoencoderKLHunyuanVideo15,
         glued_dims: Tuple[bool, bool, bool] = (True, False, False),
     ):
-        vae = cls.from_config(vae.config, dtype=vae.dtype)
+        with accelerate.init_empty_weights():
+            vae = cls.from_config(vae.config).to(vae.dtype)
         vae.load_state_dict(vae.state_dict())
         vae.glued_dims = glued_dims
         vae.kernel_dims = (
