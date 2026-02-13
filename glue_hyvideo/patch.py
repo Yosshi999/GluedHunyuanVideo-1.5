@@ -5,9 +5,10 @@ from diffusers import HunyuanVideo15Pipeline
 from .gsta import GluedSlidingTiledFlexAttnProcessor
 from .gvae import PatchedAutoencoderKLHunyuanVideo15
 
-class PatchedHunyuanVideo15Pipeline:
-    def __init__(
-        self,
+class PatchedHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
+    @classmethod
+    def from_original_pipe(
+        cls,
         pipe: HunyuanVideo15Pipeline,
         glued_dims: Tuple[bool, bool, bool] = (True, False, False),
         tile_dims: Tuple[int, int, int] = (4, 8, 8),
@@ -16,13 +17,14 @@ class PatchedHunyuanVideo15Pipeline:
         rope_theta: int = 256,
         temporal_rotation: int = 0,
     ):
-        self.pipe = pipe
-        self.glued_dims = glued_dims
-        self.tile_dims = tile_dims
-        self.kernel_dims = kernel_dims
-        self.rope_dim_list = rope_dim_list
-        self.rope_theta = rope_theta
-        self.temporal_rotation = temporal_rotation
+        pipe = cls.from_pipe(pipe)
+        pipe.glued_dims = glued_dims
+        pipe.tile_dims = tile_dims
+        pipe.kernel_dims = kernel_dims
+        pipe.rope_dim_list = rope_dim_list
+        pipe.rope_theta = rope_theta
+        pipe.temporal_rotation = temporal_rotation
+        return pipe
 
     @torch.no_grad()
     def __call__(
@@ -50,13 +52,13 @@ class PatchedHunyuanVideo15Pipeline:
         attention_kwargs: Optional[Dict[str, Any]] = None,
     ):
         if height is None and width is None:
-            height, width = self.pipe.video_processor.calculate_default_height_width(
-                self.pipe.default_aspect_ratio[1], self.pipe.default_aspect_ratio[0], self.pipe.target_size
+            height, width = self.video_processor.calculate_default_height_width(
+                self.default_aspect_ratio[1], self.default_aspect_ratio[0], self.target_size
             )
         canvas_dims =(
-            (num_frames - 1) // int(self.pipe.vae_scale_factor_temporal) + 1,
-            int(height) // int(self.pipe.vae_scale_factor_spatial),
-            int(width) // int(self.pipe.vae_scale_factor_spatial),
+            (num_frames - 1) // int(self.vae_scale_factor_temporal) + 1,
+            int(height) // int(self.vae_scale_factor_spatial),
+            int(width) // int(self.vae_scale_factor_spatial),
         )
         if self.kernel_dims is None:
             self.kernel_dims = (
@@ -65,10 +67,10 @@ class PatchedHunyuanVideo15Pipeline:
                 canvas_dims[2] // self.tile_dims[2],
             )
         processor = GluedSlidingTiledFlexAttnProcessor(canvas_dims, self.tile_dims, self.kernel_dims, self.glued_dims, self.rope_dim_list, self.rope_theta, self.temporal_rotation)
-        for block in self.pipe.transformer.transformer_blocks:
+        for block in self.transformer.transformer_blocks:
             block.attn.set_processor(processor)
         print("called patched pipeline")
-        return self.pipe(
+        return super().__call__(
             prompt,
             negative_prompt,
             height,
@@ -118,9 +120,11 @@ def patch_pipeline(
     assert pipe.__class__.__name__ == "HunyuanVideo15Pipeline", "This patch function only works for HunyuanVideo15Pipeline."
     if getattr(pipe, "__patched_gsta__", False):
         print("already patched")
-        return
+        return pipe
     setattr(pipe, "__patched_gsta__", True)
+
+    pipe = PatchedHunyuanVideo15Pipeline.from_original_pipe(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
     old_vae = pipe.vae
     pipe.vae = PatchedAutoencoderKLHunyuanVideo15(old_vae.config, glued_dims)
     pipe.vae.load_state_dict(old_vae.state_dict())
-    return PatchedHunyuanVideo15Pipeline(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
+    return pipe
