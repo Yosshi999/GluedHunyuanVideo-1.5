@@ -12,9 +12,12 @@ class PatchedAutoencoderKLHunyuanVideo15(AutoencoderKLHunyuanVideo15):
         vae: AutoencoderKLHunyuanVideo15,
         glued_dims: Tuple[bool, bool, bool] = (True, False, False),
     ):
+        original_weights = vae.state_dict()
+        original_dtype = vae.dtype
         with accelerate.init_empty_weights():
-            vae = cls.from_config(vae.config).to(vae.dtype)
-        vae.load_state_dict(vae.state_dict(), assign=True)
+            vae = cls.from_config(vae.config)
+        vae.load_state_dict(original_weights, assign=True)
+        vae.to(original_dtype)
         vae.glued_dims = glued_dims
         vae.kernel_dims = (
             vae.temporal_compression_ratio,

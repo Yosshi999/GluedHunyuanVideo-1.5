@@ -17,7 +17,7 @@ class PatchedHunyuanVideo15Pipeline(HunyuanVideo15Pipeline):
         rope_theta: int = 256,
         temporal_rotation: int = 0,
     ):
-        pipe = cls.from_pipe(pipe)
+        pipe = cls.from_pipe(pipe, torch_dtype=pipe.dtype)
         pipe.glued_dims = glued_dims
         pipe.tile_dims = tile_dims
         pipe.kernel_dims = kernel_dims
@@ -126,5 +126,4 @@ def patch_pipeline(
     pipe = PatchedHunyuanVideo15Pipeline.from_original_pipe(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
     old_vae = pipe.vae
     pipe.vae = PatchedAutoencoderKLHunyuanVideo15.from_original_vae(old_vae, glued_dims)
-    pipe.vae.load_state_dict(old_vae.state_dict())
     return pipe
