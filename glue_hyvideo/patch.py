@@ -125,6 +125,6 @@ def patch_pipeline(
 
     pipe = PatchedHunyuanVideo15Pipeline.from_original_pipe(pipe, glued_dims, tile_dims, kernel_dims, rope_dim_list, rope_theta, temporal_rotation)
     old_vae = pipe.vae
-    pipe.vae = PatchedAutoencoderKLHunyuanVideo15(old_vae.config, glued_dims)
+    pipe.vae = PatchedAutoencoderKLHunyuanVideo15.from_original_vae(old_vae, glued_dims)
     pipe.vae.load_state_dict(old_vae.state_dict())
     return pipe

@@ -6,18 +6,21 @@ import torch
 
 
 class PatchedAutoencoderKLHunyuanVideo15(AutoencoderKLHunyuanVideo15):
-    def __init__(
-        self,
-        config: dict,
+    @classmethod
+    def from_original_vae(
+        cls,
+        vae: AutoencoderKLHunyuanVideo15,
         glued_dims: Tuple[bool, bool, bool] = (True, False, False),
     ):
-        super().__init__(**config)
-        self.glued_dims = glued_dims
-        self.kernel_dims = (
-            self.temporal_compression_ratio,
-            self.spatial_compression_ratio,
-            self.spatial_compression_ratio,
+        vae = cls.from_config(vae.config, dtype=vae.dtype)
+        vae.load_state_dict(vae.state_dict())
+        vae.glued_dims = glued_dims
+        vae.kernel_dims = (
+            vae.temporal_compression_ratio,
+            vae.spatial_compression_ratio,
+            vae.spatial_compression_ratio,
         )
+        return vae
 
     @apply_forward_hook
     def decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[DecoderOutput, Tuple[torch.Tensor]]:
