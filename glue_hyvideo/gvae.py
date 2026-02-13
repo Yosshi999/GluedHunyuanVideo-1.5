@@ -1,6 +1,7 @@
 from typing import Union, Tuple
 from diffusers import AutoencoderKLHunyuanVideo15
 from diffusers.models.autoencoders.vae import DecoderOutput
+from diffusers.utils.accelerate_utils import apply_forward_hook
 import torch
 
 
@@ -17,6 +18,8 @@ class PatchedAutoencoderKLHunyuanVideo15(AutoencoderKLHunyuanVideo15):
             self.spatial_compression_ratio,
             self.spatial_compression_ratio,
         )
+
+    @apply_forward_hook
     def decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[DecoderOutput, Tuple[torch.Tensor]]:
         # z: (B, C, T, H, W)
         for i in range(3):

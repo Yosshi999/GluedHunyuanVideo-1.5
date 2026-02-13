@@ -31,10 +31,11 @@ seed = 42
 prompt = "Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard, and moves from right to left viewed from the camera. The scene is in an animated style."
 
 pipe = HunyuanVideo15Pipeline.from_pretrained("hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_t2v", torch_dtype=dtype)
+pipe = patch_pipeline(pipe, glued_dims=(True, False, True))
+
+# execute them after patching
 pipe.enable_model_cpu_offload()
 pipe.vae.enable_tiling()
-
-pipe = patch_pipeline(pipe, glued_dims=(True, False, True))
 
 generator = torch.Generator(device=device).manual_seed(seed)
 
